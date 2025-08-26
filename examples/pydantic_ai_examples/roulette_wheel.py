@@ -9,6 +9,7 @@ from __future__ import annotations as _annotations
 import asyncio
 from dataclasses import dataclass
 from typing import Literal
+import logfire
 
 from pydantic_ai import Agent, RunContext
 
@@ -19,9 +20,13 @@ class Deps:
     winning_number: int
 
 
+logfire.configure(send_to_logfire='if-token-present')
+logfire.instrument_pydantic_ai()
+
+
 # Create the agent with proper typing
 roulette_agent = Agent(
-    'groq:llama-3.3-70b-versatile',
+    'google-vertex:gemini-2.5-flash',
     deps_type=Deps,
     retries=3,
     output_type=bool,
