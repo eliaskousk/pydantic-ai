@@ -9,10 +9,9 @@ from typing import Literal
 
 import logfire
 from pydantic import BaseModel, Field
-from rich.prompt import Prompt
-
 from pydantic_ai import Agent, ModelRetry, RunContext, RunUsage, UsageLimits
 from pydantic_ai.messages import ModelMessage
+from rich.prompt import Prompt
 
 # 'if-token-present' means nothing will be sent (and the example will work) if you don't have logfire configured
 logfire.configure(send_to_logfire='if-token-present')
@@ -43,7 +42,7 @@ class Deps:
 
 # This agent is responsible for controlling the flow of the conversation.
 search_agent = Agent[Deps, FlightDetails | NoFlightFound](
-    'openai:gpt-4o',
+    'google-vertex:gemini-2.5-flash',
     output_type=FlightDetails | NoFlightFound,  # type: ignore
     retries=4,
     system_prompt=(
@@ -54,7 +53,7 @@ search_agent = Agent[Deps, FlightDetails | NoFlightFound](
 
 # This agent is responsible for extracting flight details from web page text.
 extraction_agent = Agent(
-    'openai:gpt-4o',
+    'google-vertex:gemini-2.5-flash',
     output_type=list[FlightDetails],
     system_prompt='Extract all the flight details from the given text.',
 )
@@ -98,6 +97,7 @@ async def validate_output(
 class SeatPreference(BaseModel):
     row: int = Field(ge=1, le=30)
     seat: Literal['A', 'B', 'C', 'D', 'E', 'F']
+    extra_leg_room: bool = Field(description='Whether the seat has extra leg room')
 
 
 class Failed(BaseModel):
@@ -106,16 +106,18 @@ class Failed(BaseModel):
 
 # This agent is responsible for extracting the user's seat selection
 seat_preference_agent = Agent[None, SeatPreference | Failed](
-    'openai:gpt-4o',
+    'google-vertex:gemini-2.5-flash',
     output_type=SeatPreference | Failed,
     system_prompt=(
         "Extract the user's seat preference. "
+        'Rows are numbered 1 to 30, and seats A to F. '
+        'Some rows have extra leg room: 1, 14, 20. '
         'Seats A and F are window seats. '
-        'Row 1 is the front row and has extra leg room. '
-        'Rows 14, and 20 also have extra leg room. '
+        'The user might say things like "an aisle seat", "a window seat", '
+        '"in the front", "in the back", or "with extra leg room". '
+        'If you cannot determine a valid seat, respond with Failed.'
     ),
 )
-
 
 # in reality this would be downloaded from a booking site,
 # potentially using another agent to navigate the site
