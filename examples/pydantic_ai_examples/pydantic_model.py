@@ -11,6 +11,8 @@ import logfire
 from pydantic import BaseModel
 
 from pydantic_ai import Agent
+from pydantic_ai.models.google import GoogleModel
+from pydantic_ai.providers.google import GoogleProvider
 
 # 'if-token-present' means nothing will be sent (and the example will work) if you don't have logfire configured
 logfire.configure(send_to_logfire='if-token-present')
@@ -21,8 +23,10 @@ class MyModel(BaseModel):
     city: str
     country: str
 
-
-model = os.getenv('PYDANTIC_AI_MODEL', 'openai:gpt-4o')
+provider = GoogleProvider(vertexai=True,
+                          project='stromasys-projects',
+                          location='us-east5')
+model = GoogleModel('gemini-2.5-flash', provider=provider)
 print(f'Using model: {model}')
 agent = Agent(model, output_type=MyModel)
 

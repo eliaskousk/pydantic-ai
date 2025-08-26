@@ -22,6 +22,7 @@ from __future__ import annotations as _annotations
 import asyncio
 import re
 import sys
+import time
 import unicodedata
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -30,12 +31,17 @@ import asyncpg
 import httpx
 import logfire
 import pydantic_core
-from openai import AsyncOpenAI
+from google import genai
+from google.genai.types import EmbedContentConfig
 from pydantic import TypeAdapter
 from typing_extensions import AsyncGenerator
 
 from pydantic_ai import RunContext
 from pydantic_ai.agent import Agent
+
+from pydantic_ai.models.google import GoogleModel
+from pydantic_ai.providers.google import GoogleProvider
+
 
 # 'if-token-present' means nothing will be sent (and the example will work) if you don't have logfire configured
 logfire.configure(send_to_logfire='if-token-present')
@@ -43,13 +49,54 @@ logfire.instrument_asyncpg()
 logfire.instrument_pydantic_ai()
 
 
+class RateLimiter:
+    """Rate limiter to ensure we don't exceed 30 requests per minute for embeddings."""
+    
+    def __init__(self, max_requests: int = 100, window_seconds: int = 60):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self.requests = []
+        self.lock = asyncio.Lock()
+    
+    async def acquire(self):
+        """Wait if necessary to respect the rate limit before allowing a request."""
+        async with self.lock:
+            now = time.time()
+            # Remove requests outside the current window
+            self.requests = [req_time for req_time in self.requests
+                             if now - req_time < self.window_seconds]
+            
+            # If we're at the limit, wait until the oldest request expires
+            if len(self.requests) >= self.max_requests:
+                oldest_request = self.requests[0]
+                wait_time = self.window_seconds - (now - oldest_request) + 0.1
+                if wait_time > 0:
+                    logfire.info(f'Rate limit reached, waiting {wait_time:.1f} seconds')
+                    await asyncio.sleep(wait_time)
+                    # After waiting, clean up old requests again
+                    now = time.time()
+                    self.requests = [req_time for req_time in self.requests 
+                                     if now - req_time < self.window_seconds]
+            
+            # Record this request
+            self.requests.append(now)
+
+
+# Create a global rate limiter for embedding requests (30 requests per minute)
+embedding_rate_limiter = RateLimiter(max_requests=200, window_seconds=60)
+
+
 @dataclass
 class Deps:
-    openai: AsyncOpenAI
+    genai_client: genai.Client
     pool: asyncpg.Pool
 
 
-agent = Agent('openai:gpt-4o', deps_type=Deps)
+provider = GoogleProvider(vertexai=True,
+                          project='stromasys-projects',
+                          location='us-east5')
+model = GoogleModel('gemini-2.5-flash', provider=provider)
+agent = Agent(model=model, deps_type=Deps)
 
 
 @agent.tool
@@ -60,18 +107,25 @@ async def retrieve(context: RunContext[Deps], search_query: str) -> str:
         context: The call context.
         search_query: The search query.
     """
+    # Apply rate limiting before making the embedding request
+    await embedding_rate_limiter.acquire()
+    
     with logfire.span(
         'create embedding for {search_query=}', search_query=search_query
     ):
-        embedding = await context.deps.openai.embeddings.create(
-            input=search_query,
-            model='text-embedding-3-small',
+        response = await context.deps.genai_client.aio.models.embed_content(
+            model='gemini-embedding-001',
+            contents=[search_query],
+            config=EmbedContentConfig(
+                task_type='RETRIEVAL_QUERY',
+                output_dimensionality=1536,  # Match the DB schema dimension
+            ),
         )
 
-    assert len(embedding.data) == 1, (
-        f'Expected 1 embedding, got {len(embedding.data)}, doc query: {search_query!r}'
+    assert len(response.embeddings) == 1, (
+        f'Expected 1 embedding, got {len(response.embeddings)}, doc query: {search_query!r}'
     )
-    embedding = embedding.data[0].embedding
+    embedding = response.embeddings[0].values
     embedding_json = pydantic_core.to_json(embedding).decode()
     rows = await context.deps.pool.fetch(
         'SELECT url, title, content FROM doc_sections ORDER BY embedding <-> $1 LIMIT 8',
@@ -85,13 +139,13 @@ async def retrieve(context: RunContext[Deps], search_query: str) -> str:
 
 async def run_agent(question: str):
     """Entry point to run the agent and perform RAG based question answering."""
-    openai = AsyncOpenAI()
-    logfire.instrument_openai(openai)
+    genai_client = genai.Client()
+    # Note: logfire.instrument_openai is not applicable for genai client
 
     logfire.info('Asking "{question}"', question=question)
 
     async with database_connect(False) as pool:
-        deps = Deps(openai=openai, pool=pool)
+        deps = Deps(genai_client=genai_client, pool=pool)
         answer = await agent.run(question, deps=deps)
     print(answer.output)
 
@@ -117,9 +171,6 @@ async def build_search_db():
         response.raise_for_status()
     sections = sessions_ta.validate_json(response.content)
 
-    openai = AsyncOpenAI()
-    logfire.instrument_openai(openai)
-
     async with database_connect(True) as pool:
         with logfire.span('create schema'):
             async with pool.acquire() as conn:
@@ -128,13 +179,14 @@ async def build_search_db():
 
         sem = asyncio.Semaphore(10)
         async with asyncio.TaskGroup() as tg:
+            genai_client = genai.Client()
             for section in sections:
-                tg.create_task(insert_doc_section(sem, openai, pool, section))
+                tg.create_task(insert_doc_section(sem, genai_client, pool, section))
 
 
 async def insert_doc_section(
     sem: asyncio.Semaphore,
-    openai: AsyncOpenAI,
+    genai_client: genai.Client,
     pool: asyncpg.Pool,
     section: DocsSection,
 ) -> None:
@@ -145,15 +197,22 @@ async def insert_doc_section(
             logfire.info('Skipping {url=}', url=url)
             return
 
+        # Apply rate limiting before making the embedding request
+        await embedding_rate_limiter.acquire()
+
         with logfire.span('create embedding for {url=}', url=url):
-            embedding = await openai.embeddings.create(
-                input=section.embedding_content(),
-                model='text-embedding-3-small',
+            response = await genai_client.aio.models.embed_content(
+                model='gemini-embedding-001',
+                contents=[section.embedding_content()],
+                config=EmbedContentConfig(
+                    task_type='RETRIEVAL_DOCUMENT',
+                    output_dimensionality=1536,  # Match the DB schema dimension
+                ),
             )
-        assert len(embedding.data) == 1, (
-            f'Expected 1 embedding, got {len(embedding.data)}, doc section: {section}'
+        assert len(response.embeddings) == 1, (
+            f'Expected 1 embedding, got {len(response.embeddings)}, doc section: {section}'
         )
-        embedding = embedding.data[0].embedding
+        embedding = response.embeddings[0].values
         embedding_json = pydantic_core.to_json(embedding).decode()
         await pool.execute(
             'INSERT INTO doc_sections (url, title, content, embedding) VALUES ($1, $2, $3, $4)',
@@ -193,7 +252,7 @@ async def database_connect(
     create_db: bool = False,
 ) -> AsyncGenerator[asyncpg.Pool, None]:
     server_dsn, database = (
-        'postgresql://postgres:postgres@localhost:54320',
+        'postgresql://ai:ai@localhost:5432',
         'pydantic_ai_rag',
     )
     if create_db:
@@ -223,7 +282,6 @@ CREATE TABLE IF NOT EXISTS doc_sections (
     url text NOT NULL UNIQUE,
     title text NOT NULL,
     content text NOT NULL,
-    -- text-embedding-3-small returns a vector of 1536 floats
     embedding vector(1536) NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_doc_sections_embedding ON doc_sections USING hnsw (embedding vector_l2_ops);

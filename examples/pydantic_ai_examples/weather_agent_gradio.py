@@ -3,9 +3,10 @@ from __future__ import annotations as _annotations
 import json
 
 from httpx import AsyncClient
+from pydantic import BaseModel
 
 from pydantic_ai.messages import ToolCallPart, ToolReturnPart
-from pydantic_ai_examples.weather_agent import Deps, weather_agent
+from weather_agent import Deps, weather_agent
 
 try:
     import gradio as gr
@@ -48,8 +49,13 @@ async def stream_from_agent(prompt: str, chatbot: list[dict], past_messages: lis
                             gr_message.get('metadata', {}).get('id', '')
                             == call.tool_call_id
                         ):
+                            # Handle Pydantic models properly
+                            if isinstance(call.content, BaseModel):
+                                content_json = call.content.model_dump()
+                            else:
+                                content_json = call.content
                             gr_message['content'] += (
-                                f'\nOutput: {json.dumps(call.content)}'
+                                f'\nOutput: {json.dumps(content_json)}'
                             )
                 yield gr.skip(), chatbot, gr.skip()
         chatbot.append({'role': 'assistant', 'content': ''})
