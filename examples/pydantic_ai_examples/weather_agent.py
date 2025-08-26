@@ -20,6 +20,8 @@ from httpx import AsyncClient
 from pydantic import BaseModel
 
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.models.google import GoogleModel
+from pydantic_ai.providers.google import GoogleProvider
 
 # 'if-token-present' means nothing will be sent (and the example will work) if you don't have logfire configured
 logfire.configure(send_to_logfire='if-token-present')
@@ -30,9 +32,12 @@ logfire.instrument_pydantic_ai()
 class Deps:
     client: AsyncClient
 
-
+provider = GoogleProvider(vertexai=True,
+                          project='stromasys-projects',
+                          location='us-east5')
+model = GoogleModel('gemini-2.5-flash', provider=provider)
 weather_agent = Agent(
-    'openai:gpt-4.1-mini',
+    model=model,
     # 'Be concise, reply with one sentence.' is enough for some models (like openai) to use
     # the below tools appropriately, but others like anthropic and gemini require a bit more direction.
     instructions='Be concise, reply with one sentence.',

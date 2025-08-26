@@ -36,11 +36,19 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
+from pydantic_ai.models.google import GoogleModel
+from pydantic_ai.providers.google import GoogleProvider
+
 # 'if-token-present' means nothing will be sent (and the example will work) if you don't have logfire configured
 logfire.configure(send_to_logfire='if-token-present')
 logfire.instrument_pydantic_ai()
 
-agent = Agent('openai:gpt-4o')
+provider = GoogleProvider(vertexai=True,
+                          project='stromasys-projects',
+                          location='us-east5')
+model = GoogleModel('gemini-2.5-flash', provider=provider)
+
+agent = Agent(model=model)
 THIS_DIR = Path(__file__).parent
 
 

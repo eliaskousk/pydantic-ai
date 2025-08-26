@@ -1,34 +1,16 @@
-"""Small but complete example of using Pydantic AI to build a support agent for a bank.
+"""Debug version of bank_support.py to identify the hanging issue."""
 
-Run with:
-
-    uv run -m pydantic_ai_examples.bank_support
-"""
-
+import asyncio
+import sys
 from dataclasses import dataclass
-import logfire
 
 from pydantic import BaseModel, Field
-
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.models.openai import OpenAIModel
+from pydantic_ai.providers.ollama import OllamaProvider
 
-from pydantic_ai.models.google import GoogleModel
-from pydantic_ai.providers.google import GoogleProvider
-# from pydantic_ai.models.openai import OpenAIModel
-# from pydantic_ai.providers.ollama import OllamaProvider
-
-
-logfire.configure()
-logfire.instrument_pydantic_ai()
-logfire.instrument_httpx(capture_all=True)
 
 class DatabaseConn:
-    """This is a fake database for example purposes.
-
-    In reality, you'd be connecting to an external database
-    (e.g. PostgreSQL) to get information about customers.
-    """
-
     @classmethod
     async def customer_name(cls, *, id: int) -> str | None:
         if id == 123:
@@ -57,17 +39,16 @@ class SupportOutput(BaseModel):
     risk: int = Field(description='Risk level of query', ge=0, le=10)
 
 
-provider = GoogleProvider(vertexai=True,
-                          project='stromasys-projects',
-                          location='us-east5')
-model = GoogleModel('gemini-2.5-flash', provider=provider)
-# model = OpenAIModel(
-#     model_name='qwen3:0.6b',
-#     provider=OllamaProvider(base_url='http://localhost:11434/v1'),
-# )
+print("Creating Ollama model...", flush=True)
+ollama_model = OpenAIModel(
+    model_name='qwen3:8b',
+    provider=OllamaProvider(base_url='http://localhost:11434/v1'),
+)
+print("Model created successfully", flush=True)
 
+print("Creating support agent...", flush=True)
 support_agent = Agent(
-    model=model,
+    model=ollama_model,
     deps_type=SupportDependencies,
     output_type=SupportOutput,
     system_prompt=(
@@ -76,11 +57,14 @@ support_agent = Agent(
         "Reply using the customer's name."
     ),
 )
+print("Agent created successfully", flush=True)
 
 
 @support_agent.system_prompt
 async def add_customer_name(ctx: RunContext[SupportDependencies]) -> str:
+    print("Getting customer name...", flush=True)
     customer_name = await ctx.deps.db.customer_name(id=ctx.deps.customer_id)
+    print(f"Customer name: {customer_name}", flush=True)
     return f"The customer's name is {customer_name!r}"
 
 
@@ -89,28 +73,37 @@ async def customer_balance(
     ctx: RunContext[SupportDependencies], include_pending: bool
 ) -> str:
     """Returns the customer's current account balance."""
+    print(f"Getting balance (include_pending={include_pending})...", flush=True)
     balance = await ctx.deps.db.customer_balance(
         id=ctx.deps.customer_id,
         include_pending=include_pending,
     )
+    print(f"Balance: ${balance:.2f}", flush=True)
     return f'${balance:.2f}'
 
 
 async def main():
+    print("Starting main function...", flush=True)
     deps = SupportDependencies(customer_id=123, db=DatabaseConn())
-    result = await support_agent.run('What is my balance? Include pending transactions.', deps=deps)
-    print(result.output)
-    """
-    support_advice='Hello John, your current account balance, including pending transactions, is $123.45.' block_card=False risk=1
-    """
-
-    result = await support_agent.run('I just lost my card!', deps=deps)
-    print(result.output)
-    """
-    support_advice="I'm sorry to hear that, John. We are temporarily blocking your card to prevent unauthorized transactions." block_card=True risk=8
-    """
+    print("Dependencies created", flush=True)
+    
+    print("\nRunning query: 'What is my balance?'", flush=True)
+    try:
+        result = await support_agent.run('What is my balance?', deps=deps)
+        print(f"Result: {result.output}", flush=True)
+    except Exception as e:
+        print(f"Error: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == '__main__':
-    import asyncio
-    asyncio.run(main())
+    print("Starting script...", flush=True)
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nInterrupted by user", flush=True)
+    except Exception as e:
+        print(f"Unhandled error: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
