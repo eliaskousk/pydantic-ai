@@ -6,11 +6,19 @@ Run with:
 """
 
 from dataclasses import dataclass
+import logfire
 
 from pydantic import BaseModel
 
 from pydantic_ai import Agent, RunContext
 
+# from pydantic_ai.models.openai import OpenAIModel
+# from pydantic_ai.providers.ollama import OllamaProvider
+
+
+logfire.configure()
+logfire.instrument_pydantic_ai()
+logfire.instrument_httpx(capture_all=True)
 
 class DatabaseConn:
     """This is a fake database for example purposes.
@@ -50,8 +58,13 @@ class SupportOutput(BaseModel):
     """Risk level of query"""
 
 
+# model = OpenAIModel(
+#     model_name='qwen3:0.6b',
+#     provider=OllamaProvider(base_url='http://localhost:11434/v1'),
+# )
+
 support_agent = Agent(
-    'openai:gpt-4o',
+    'google-vertex:gemini-2.5-flash',
     deps_type=SupportDependencies,
     output_type=SupportOutput,
     instructions=(
@@ -80,16 +93,21 @@ async def customer_balance(
     return f'${balance:.2f}'
 
 
-if __name__ == '__main__':
+async def main():
     deps = SupportDependencies(customer_id=123, db=DatabaseConn())
-    result = support_agent.run_sync('What is my balance?', deps=deps)
+    result = await support_agent.run('What is my balance? Include pending transactions.', deps=deps)
     print(result.output)
     """
     support_advice='Hello John, your current account balance, including pending transactions, is $123.45.' block_card=False risk=1
     """
 
-    result = support_agent.run_sync('I just lost my card!', deps=deps)
+    result = await support_agent.run('I just lost my card!', deps=deps)
     print(result.output)
     """
     support_advice="I'm sorry to hear that, John. We are temporarily blocking your card to prevent unauthorized transactions." block_card=True risk=8
     """
+
+
+if __name__ == '__main__':
+    import asyncio
+    asyncio.run(main())
